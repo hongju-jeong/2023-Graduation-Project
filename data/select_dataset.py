@@ -32,7 +32,8 @@ def define_Dataset(dataset_opt):
     # -----------------------------------------
     # super-resolution
     # -----------------------------------------
-    elif dataset_type in ['sr', 'super-resolution']:
+
+    elif dataset_type in ['sr', 'super-resolution']:   #data에 L이 있으면
         from data.dataset_sr import DatasetSR as D
 
     elif dataset_type in ['srmd']:
@@ -44,7 +45,8 @@ def define_Dataset(dataset_opt):
     elif dataset_type in ['usrnet', 'usrgan']:
         from data.dataset_usrnet import DatasetUSRNet as D
 
-    elif dataset_type in ['bsrnet', 'bsrgan', 'blindsr']:
+
+    elif dataset_type in ['bsrnet', 'bsrgan', 'blindsr']:   #data에 L이 없으면
         from data.dataset_blindsr import DatasetBlindSR as D
 
     # -------------------------------------------------
