@@ -1,6 +1,7 @@
 {
   "task": "swinir_sr_realworld_x4_psnr"     // real-world image sr. root/task/images-models-options
   , "model": "plain" // "plain" | "plain2" if two inputs
+
   , "gpu_ids": [0]
   , "dist": true
 
