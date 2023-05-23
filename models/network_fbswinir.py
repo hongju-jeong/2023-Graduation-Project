@@ -42,6 +42,7 @@ def window_partition(x, window_size):
         windows: (num_windows*B, window_size, window_size, C)
     """
     B, H, W, C = x.shape
+    #print("window_partition x shape", x.shape)
     x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
     windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
     return windows
@@ -118,7 +119,10 @@ class WindowAttention(nn.Module):
             x: input features with shape of (num_windows*B, N, C)
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
+        #B_, N= x.shape
         B_, N, C = x.shape
+        #C = _ // (3 * self.num_)
+        
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
@@ -704,22 +708,36 @@ class QFAttention(nn.Module):
         return x + res
 
 
-class FBCNN(nn.Module):
+class FBCNN(nn.Module):  #nc=[64, 128, 256, 512]   ,nc=[96, 192, 384, 768]
     def __init__(self, img_size=64, patch_size=1,in_nc=3, out_nc=3,
                  embed_dim=96, depths=[3, 3, 3], num_heads=[6, 6, 6],
                  window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None,
-                 nc=[64, 128, 256, 512], nb=4, act_mode='R', downsample_mode='strideconv',
+                 nc=[96, 192, 384, 768], nb=4, act_mode='R', downsample_mode='strideconv', #strideconv
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True, resi_connection='1conv',
-                 use_checkpoint=False,
+                 use_checkpoint=False, img_range=1,
                  upsample_mode='convtranspose'):
         super(FBCNN, self).__init__()
+        
+        self.img_range = img_range
+        if in_nc == 3:
+            rgb_mean = (0.4488, 0.4371, 0.4040)
+            self.mean = torch.Tensor(rgb_mean).view(1, 3, 1, 1)
+        else:
+            self.mean = torch.zeros(1, 1, 1, 1)
+            
+        self.window_size = window_size
 
         #####################################################################################################
         ################################### 1, shallow feature extraction ###################################
+        #self.m_head = conv(in_nc, nc[0], bias=True, mode='C')
         self.m_head = conv(in_nc, nc[0], bias=True, mode='C')
+        #self.conv_first = nn.Conv2d(in_nc, embed_dim, 3, 1, 1)
         self.nb = nb
         self.nc = nc
+        
+        
+        
         # downsample
         if downsample_mode == 'avgpool':
             downsample_block = downsample_avgpool
@@ -738,25 +756,72 @@ class FBCNN(nn.Module):
         self.patch_norm = patch_norm
         self.ape = ape
         self.num_features = embed_dim
+        self.num_features1 = nc[0]
+        self.num_features2 = nc[1]
+        self.num_features3 = nc[2]
+        
         self.mlp_ratio = mlp_ratio
         
+        
+        # deep block 1
+        
         # split image into non-overlapping patches
-        self.patch_embed = PatchEmbed(
-            img_size=img_size, patch_size=patch_size, in_chans=embed_dim, embed_dim=embed_dim,
+        self.patch_embed1 = PatchEmbed(
+            img_size=img_size, patch_size=patch_size, in_chans=nc[0], embed_dim=nc[0],
             norm_layer=norm_layer if self.patch_norm else None)
-        num_patches = self.patch_embed.num_patches
-        patches_resolution = self.patch_embed.patches_resolution
+        num_patches = self.patch_embed1.num_patches
+        patches_resolution = self.patch_embed1.patches_resolution
         self.patches_resolution = patches_resolution
         
         # merge non-overlapping patches into image
-        self.patch_unembed = PatchUnEmbed(
-            img_size=img_size, patch_size=patch_size, in_chans=embed_dim, embed_dim=embed_dim,
+        self.patch_unembed1 = PatchUnEmbed(
+            img_size=img_size, patch_size=patch_size, in_chans=nc[0], embed_dim=nc[0],
             norm_layer=norm_layer if self.patch_norm else None)
         
         # absolute position embedding
         if self.ape:
-            self.absolute_pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
-            trunc_normal_(self.absolute_pos_embed, std=.02)
+            self.absolute_pos_embed1 = nn.Parameter(torch.zeros(1, num_patches, nc[0]))
+            trunc_normal_(self.absolute_pos_embed1, std=.02)
+            
+        # deep block 2
+        
+        # split image into non-overlapping patches
+        self.patch_embed2 = PatchEmbed(
+            img_size=img_size, patch_size=patch_size, in_chans=nc[1], embed_dim=nc[1],
+            norm_layer=norm_layer if self.patch_norm else None)
+        num_patches = self.patch_embed2.num_patches
+        patches_resolution = self.patch_embed2.patches_resolution
+        self.patches_resolution = patches_resolution
+        
+        # merge non-overlapping patches into image
+        self.patch_unembed2 = PatchUnEmbed(
+            img_size=img_size, patch_size=patch_size, in_chans=nc[1], embed_dim=nc[1],
+            norm_layer=norm_layer if self.patch_norm else None)
+        
+        # absolute position embedding
+        if self.ape:
+            self.absolute_pos_embed2 = nn.Parameter(torch.zeros(1, num_patches, nc[1]))
+            trunc_normal_(self.absolute_pos_embed2, std=.02)
+            
+        # deep block 3
+        
+        # split image into non-overlapping patches
+        self.patch_embed3 = PatchEmbed(
+            img_size=img_size, patch_size=patch_size, in_chans=nc[2], embed_dim=nc[2],
+            norm_layer=norm_layer if self.patch_norm else None)
+        num_patches = self.patch_embed3.num_patches
+        patches_resolution = self.patch_embed3.patches_resolution
+        self.patches_resolution = patches_resolution
+        
+        # merge non-overlapping patches into image
+        self.patch_unembed3 = PatchUnEmbed(
+            img_size=img_size, patch_size=patch_size, in_chans=nc[2], embed_dim=nc[2],
+            norm_layer=norm_layer if self.patch_norm else None)
+        
+        # absolute position embedding
+        if self.ape:
+            self.absolute_pos_embed3 = nn.Parameter(torch.zeros(1, num_patches, nc[2]))
+            trunc_normal_(self.absolute_pos_embed3, std=.02)
 
         self.pos_drop = nn.Dropout(p=drop_rate)
         
@@ -764,9 +829,9 @@ class FBCNN(nn.Module):
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
         
         # build Residual Swin Transformer blocks (RSTB)
-        self.layers = nn.ModuleList()
+        self.layers1 = nn.ModuleList()
         for i_layer in range(self.num_layers):
-            layer = RSTB(dim=embed_dim,
+            layer = RSTB(dim=nc[0],
                          input_resolution=(patches_resolution[0],
                                            patches_resolution[1]),
                          depth=depths[i_layer],
@@ -784,14 +849,67 @@ class FBCNN(nn.Module):
                          resi_connection=resi_connection
 
                          )
-            self.layers.append(layer)
+            self.layers1.append(layer)
+            
+        self.layers2 = nn.ModuleList()
+        for i_layer in range(self.num_layers):
+            layer = RSTB(dim=nc[1],
+                         input_resolution=(patches_resolution[0],
+                                           patches_resolution[1]),
+                         depth=depths[i_layer],
+                         num_heads=num_heads[i_layer],
+                         window_size=window_size,
+                         mlp_ratio=self.mlp_ratio,
+                         qkv_bias=qkv_bias, qk_scale=qk_scale,
+                         drop=drop_rate, attn_drop=attn_drop_rate,
+                         drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],  # no impact on SR results
+                         norm_layer=norm_layer,
+                         downsample=None,
+                         use_checkpoint=use_checkpoint,
+                         img_size=img_size,
+                         patch_size=patch_size,
+                         resi_connection=resi_connection
+
+                         )
+            self.layers2.append(layer)
+            
+        self.layers3 = nn.ModuleList()
+        for i_layer in range(self.num_layers):
+            layer = RSTB(dim=nc[2],
+                         input_resolution=(patches_resolution[0],
+                                           patches_resolution[1]),
+                         depth=depths[i_layer],
+                         num_heads=num_heads[i_layer],
+                         window_size=window_size,
+                         mlp_ratio=self.mlp_ratio,
+                         qkv_bias=qkv_bias, qk_scale=qk_scale,
+                         drop=drop_rate, attn_drop=attn_drop_rate,
+                         drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],  # no impact on SR results
+                         norm_layer=norm_layer,
+                         downsample=None,
+                         use_checkpoint=use_checkpoint,
+                         img_size=img_size,
+                         patch_size=patch_size,
+                         resi_connection=resi_connection
+
+                         )
+            self.layers3.append(layer)
+            
         self.norm = norm_layer(self.num_features)
+        
+        self.norm1 = norm_layer(self.num_features1)
+        self.norm2 = norm_layer(self.num_features2)
+        self.norm3 = norm_layer(self.num_features3)
         
         # build the last conv layer in deep feature extraction
         if resi_connection == '1conv':
+            # self.f_down1 = downsample_block(nc[0], nc[1], bias=True, mode='2')
+            # self.f_down2 = downsample_block(nc[1], nc[2], bias=True, mode='2')
+            # self.f_down3 = downsample_block(nc[2], nc[3], bias=True, mode='2')
             self.f_down1 = nn.Conv2d(nc[0], nc[1], 3, 1, 1)
             self.f_down2 = nn.Conv2d(nc[1], nc[2], 3, 1, 1)
             self.f_down3 = nn.Conv2d(nc[2], nc[3], 3, 1, 1)
+            
             
         # elif resi_connection == '3conv':
         #     # to save parameters and memory
@@ -826,15 +944,22 @@ class FBCNN(nn.Module):
             upsample_block = upsample_convtranspose
         else:
             raise NotImplementedError('upsample mode [{:s}] is not found'.format(upsample_mode))
+        
+        self.f_up3 = nn.ModuleList([nn.Conv2d(nc[3], nc[2],3,1,1),
+                                    *[QFAttention(nc[2], nc[2], bias=True, mode='C' + act_mode + 'C') for _ in range(nb)]])
+        self.f_up2 = nn.ModuleList([nn.Conv2d(nc[2], nc[1],3,1,1),
+                                    *[QFAttention(nc[1], nc[1], bias=True, mode='C' + act_mode + 'C') for _ in range(nb)]])
+        self.f_up1 = nn.ModuleList([nn.Conv2d(nc[1], nc[0],3,1,1),
+                                    *[QFAttention(nc[0], nc[0], bias=True, mode='C' + act_mode + 'C') for _ in range(nb)]])
 
-        self.m_up3 = nn.ModuleList([upsample_block(nc[3], nc[2], bias=True, mode='2'),
-                                  *[QFAttention(nc[2], nc[2], bias=True, mode='C' + act_mode + 'C') for _ in range(nb)]])
+        # self.m_up3 = nn.ModuleList([upsample_block(nc[3], nc[2], bias=True, mode='2'),
+        #                           *[QFAttention(nc[2], nc[2], bias=True, mode='C' + act_mode + 'C') for _ in range(nb)]])
 
-        self.m_up2 = nn.ModuleList([upsample_block(nc[2], nc[1], bias=True, mode='2'),
-                                  *[QFAttention(nc[1], nc[1], bias=True, mode='C' + act_mode + 'C') for _ in range(nb)]])
+        # self.m_up2 = nn.ModuleList([upsample_block(nc[2], nc[1], bias=True, mode='2'),
+        #                           *[QFAttention(nc[1], nc[1], bias=True, mode='C' + act_mode + 'C') for _ in range(nb)]])
 
-        self.m_up1 = nn.ModuleList([upsample_block(nc[1], nc[0], bias=True, mode='2'),
-                                  *[QFAttention(nc[0], nc[0], bias=True, mode='C' + act_mode + 'C') for _ in range(nb)]])
+        # self.m_up1 = nn.ModuleList([upsample_block(nc[1], nc[0], bias=True, mode='2'),
+        #                           *[QFAttention(nc[0], nc[0], bias=True, mode='C' + act_mode + 'C') for _ in range(nb)]])
 
 
         self.m_tail = conv(nc[0], out_nc, bias=True, mode='C')
@@ -843,66 +968,114 @@ class FBCNN(nn.Module):
         self.qf_pred = sequential(*[ResBlock(nc[3], nc[3], bias=True, mode='C' + act_mode + 'C') for _ in range(nb)],
                                   torch.nn.AdaptiveAvgPool2d((1,1)),
                                   torch.nn.Flatten(),
-                                  torch.nn.Linear(512, 512), 
+                                  torch.nn.Linear(768, 768), 
                                   nn.ReLU(),
-                                  torch.nn.Linear(512, 512),
+                                  torch.nn.Linear(768, 768),
                                   nn.ReLU(),
-                                  torch.nn.Linear(512, 1),
+                                  torch.nn.Linear(768, 1),
                                   nn.Sigmoid()
                                 )
 
-        self.qf_embed = sequential(torch.nn.Linear(1, 512),
+        self.qf_embed = sequential(torch.nn.Linear(1, 768),
                                   nn.ReLU(),
-                                  torch.nn.Linear(512, 512),
+                                  torch.nn.Linear(768, 768),
                                   nn.ReLU(),
-                                  torch.nn.Linear(512, 512),
+                                  torch.nn.Linear(768, 768),
                                   nn.ReLU()
                                 )
 
-        self.to_gamma_3 = sequential(torch.nn.Linear(512, nc[2]),nn.Sigmoid())
-        self.to_beta_3 =  sequential(torch.nn.Linear(512, nc[2]),nn.Tanh())
-        self.to_gamma_2 = sequential(torch.nn.Linear(512, nc[1]),nn.Sigmoid())
-        self.to_beta_2 =  sequential(torch.nn.Linear(512, nc[1]),nn.Tanh())
-        self.to_gamma_1 = sequential(torch.nn.Linear(512, nc[0]),nn.Sigmoid())
-        self.to_beta_1 =  sequential(torch.nn.Linear(512, nc[0]),nn.Tanh())
+        self.to_gamma_3 = sequential(torch.nn.Linear(768, nc[2]),nn.Sigmoid())
+        self.to_beta_3 =  sequential(torch.nn.Linear(768, nc[2]),nn.Tanh())
+        self.to_gamma_2 = sequential(torch.nn.Linear(768, nc[1]),nn.Sigmoid())
+        self.to_beta_2 =  sequential(torch.nn.Linear(768, nc[1]),nn.Tanh())
+        self.to_gamma_1 = sequential(torch.nn.Linear(768, nc[0]),nn.Sigmoid())
+        self.to_beta_1 =  sequential(torch.nn.Linear(768, nc[0]),nn.Tanh())
 
 
-    def forward_features(self, x):
+    def check_image_size(self, x):
+        _, _, h, w = x.size()
+        mod_pad_h = (self.window_size - h % self.window_size) % self.window_size
+        mod_pad_w = (self.window_size - w % self.window_size) % self.window_size
+        x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
+        return x
+    
+    def forward_features1(self, x):
         x_size = (x.shape[2], x.shape[3])
-        x = self.patch_embed(x)
+        x = self.patch_embed1(x)
         if self.ape:
-            x = x + self.absolute_pos_embed
+            x = x + self.absolute_pos_embed1
         x = self.pos_drop(x)
 
-        for layer in self.layers:
+        for layer in self.layers1:
             x = layer(x, x_size)
 
-        x = self.norm(x)  # B L C
-        x = self.patch_unembed(x, x_size)
+        x = self.norm1(x)  # B L C
+        x = self.patch_unembed1(x, x_size)
+
+        return x
+    
+    def forward_features2(self, x):
+        x_size = (x.shape[2], x.shape[3])
+        x = self.patch_embed2(x)
+        if self.ape:
+            x = x + self.absolute_pos_embed2
+        x = self.pos_drop(x)
+
+        for layer in self.layers2:
+            x = layer(x, x_size)
+
+        x = self.norm2(x)  # B L C
+        x = self.patch_unembed2(x, x_size)
+
+        return x
+    
+    def forward_features3(self, x):
+        x_size = (x.shape[2], x.shape[3])
+        x = self.patch_embed3(x)
+        if self.ape:
+            x = x + self.absolute_pos_embed3
+        x = self.pos_drop(x)
+
+        for layer in self.layers3:
+            x = layer(x, x_size)
+
+        x = self.norm3(x)  # B L C
+        x = self.patch_unembed3(x, x_size)
 
         return x
 
     def forward(self, x, qf_input=None):
 
-        h, w = x.size()[-2:]
-        paddingBottom = int(np.ceil(h / 8) * 8 - h)
-        paddingRight = int(np.ceil(w / 8) * 8 - w)
-        x = nn.ReplicationPad2d((0, paddingRight, 0, paddingBottom))(x)
+        # h, w = x.size()[-2:]
+        # paddingBottom = int(np.ceil(h / 8) * 8 - h)
+        # paddingRight = int(np.ceil(w / 8) * 8 - w)
+        # x = nn.ReplicationPad2d((0, paddingRight, 0, paddingBottom))(x)
+        
+        h, w = x.shape[2:]
+        x = self.check_image_size(x)
+
+        self.mean = self.mean.type_as(x)
+        x = (x - self.mean) * self.img_range
 
         #shallow feature extraction
         x1 = self.m_head(x)
+        #x1 = self.conv_first(x)
+        print("x1 : ", x1.shape)
         
         #x2 = self.m_down1(x1)
         #deep feature extraction 1
-        x2 = self.f_down1(self.forward_features(x1) + x1)
+        x2 = self.f_down1(self.forward_features1(x1) + x1)
+        print("x2 : ", x2.shape)
                 
         #x3 = self.m_down2(x2)
         #deep feature extraction 2
-        x3 = self.f_down2(self.forward_features(x2) + x2)
+        x3 = self.f_down2(self.forward_features2(x2) + x2)
+        print("x3 : ", x3.shape)
         
         #x4 = self.m_down3(x3)
         #deep feature extraction 3
-        x4 = self.f_down3(self.forward_features(x3) + x3)
+        x4 = self.f_down3(self.forward_features3(x3) + x3)
+        print("x4 : ", x4.shape)
         
         x = self.m_body_encoder(x4)
         qf = self.qf_pred(x)
@@ -918,30 +1091,69 @@ class FBCNN(nn.Module):
         beta_1 = self.to_beta_1(qf_embedding)
 
 
+        print("x : ", x.shape)
+        print("x4 : ", x4.shape)
         x = x + x4
-        x = self.m_up3[0](x)
+        
+        x = self.f_up3[0](x)
+        # x = self.m_up3[0](x)
         for i in range(self.nb):
-            x = self.m_up3[i+1](x, gamma_3,beta_3)
+            x = self.f_up3[i+1](x, gamma_3,beta_3)
+            #x = self.m_up3[i+1](x, gamma_3,beta_3)
 
+        print("x : ", x.shape)
+        print("x3 : ", x3.shape)
         x = x + x3
 
-        x = self.m_up2[0](x)
+        x = self.f_up2[0](x)
+        # x = self.m_up2[0](x)
         for i in range(self.nb):
-            x = self.m_up2[i+1](x, gamma_2, beta_2)
+            x = self.f_up2[i+1](x, gamma_2,beta_2)
+            #x = self.m_up2[i+1](x, gamma_2, beta_2)
+            
+        print("x : ", x.shape)
+        print("x2 : ", x2.shape)
         x = x + x2
 
-        x = self.m_up1[0](x)
+        x = self.f_up1[0](x)
+        #x = self.m_up1[0](x)
         for i in range(self.nb):
-            x = self.m_up1[i+1](x, gamma_1, beta_1)
+            x = self.f_up1[i+1](x, gamma_1, beta_1)
+            #x = self.m_up1[i+1](x, gamma_1, beta_1)
 
+        print("x : ", x.shape)
+        print("x1 : ", x1.shape)
         x = x + x1
         x = self.m_tail(x)
         x = x[..., :h, :w]
 
         return x, qf
+    
+    # def flops(self):
+    #     flops = 0
+    #     H, W = self.patches_resolution
+    #     flops += H * W * 3 * self.embed_dim * 9
+    #     flops += self.patch_embed.flops()
+    #     for i, layer in enumerate(self.layers):
+    #         flops += layer.flops()
+    #     flops += H * W * 3 * self.embed_dim * self.embed_dim
+    #     flops += self.upsample.flops()
+    #     return flops
 
 if __name__ == "__main__":
-    x = torch.randn(1, 3, 96, 96)#.cuda()#.to(torch.device('cuda'))
-    fbar=FBAR()
-    y,qf = fbar(x)
+    upscale = 4
+    window_size = 8
+    height = (1024 // upscale // window_size + 1) * window_size
+    width = (720 // upscale // window_size + 1) * window_size
+    
+    model = FBCNN(img_size=(height,width),
+                  window_size=window_size, img_range=1.,mlp_ratio=2,
+                  embed_dim=96)
+    print(model)
+    print(height, width)
+    #print(height, width, model.flops() / 1e9)
+    
+    x = torch.randn(1, 3, height, width).cuda().to(torch.device('cuda'))
+    model = model.to('cuda')
+    y,qf = model(x)
     print(y.shape,qf.shape)
