@@ -30,3 +30,4 @@
 ### Artifact Removal
 
 ![artifacts.png](fig/artifacts.png)
+
