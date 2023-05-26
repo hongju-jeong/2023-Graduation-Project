@@ -8,11 +8,9 @@ from collections import OrderedDict
 import logging
 import torch
 from torch.utils.data import DataLoader
-
 from utils import utils_logger
 from utils import utils_image as util
 from utils import utils_option as option
-
 from data.select_dataset import define_Dataset
 from models.select_model import define_Model
 
@@ -36,7 +34,7 @@ def main(json_path='options/swinir/train_fbswinir_color.json'):
     opt['path']['pretrained_optimizerG'] = init_path_optimizerG
     current_step = max(init_iter_G, init_iter_E, init_iter_optimizerG)
     
-    border = opt['scale']
+    border = 0
     # --<--<--<--<--<--<--<--<--<--<--<--<--<-
     
     # ----------------------------------------
@@ -74,6 +72,9 @@ def main(json_path='options/swinir/train_fbswinir_color.json'):
     # 1) create_dataset
     # 2) creat_dataloader for train and test
     # ----------------------------------------
+    
+    dataset_type = opt['datasets']['train']['dataset_type']
+    
     for phase, dataset_opt in opt['datasets'].items():
         if phase == 'train':
             train_set = define_Dataset(dataset_opt)
@@ -96,8 +97,140 @@ def main(json_path='options/swinir/train_fbswinir_color.json'):
         else:
             raise NotImplementedError("Phase [%s] is not recognized." % phase)
             
-            
-            
+# initialize model
+    model = define_Model(opt)
+
+    if opt['merge_bn'] and current_step > opt['merge_bn_startpoint']:
+        logger.info('^_^ -----merging bnorm----- ^_^')
+        model.merge_bnorm_test()
+
+    logger.info(model.info_network())
+    model.init_train()
+    logger.info(model.info_params())
+    
+
+# main training
+
+    for epoch in range(1000000):  # keep running
+        for i, train_data in enumerate(train_loader):
+            current_step += 1
+
+            if dataset_type == 'dnpatch' and current_step % 20000 == 0:  # for 'train400'
+                train_loader.dataset.update_data()
+
+            # -------------------------------
+            # 1) update learning rate
+            # -------------------------------
+            model.update_learning_rate(current_step)
+
+            # -------------------------------
+            # 2) feed patch pairs
+            # -------------------------------
+            model.feed_data(train_data)
+
+            # -------------------------------
+            # 3) optimize parameters
+            # -------------------------------
+            model.optimize_parameters(current_step)
+
+            # -------------------------------
+            # merge bnorm
+            # -------------------------------
+            if opt['merge_bn'] and opt['merge_bn_startpoint'] == current_step:
+                logger.info('^_^ -----merging bnorm----- ^_^')
+                model.merge_bnorm_train()
+                model.print_network()
+
+            # -------------------------------
+            # 4) training information
+            # -------------------------------
+            if current_step % opt['train']['checkpoint_print'] == 0:
+                logs = model.current_log()  # such as loss
+                message = '<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> '.format(epoch, current_step, model.current_learning_rate())
+                for k, v in logs.items():  # merge log information into message
+                    message += '{:s}: {:.3e} '.format(k, v)
+                logger.info(message)
+
+            # -------------------------------
+            # 5) save model
+            # -------------------------------
+            if current_step % opt['train']['checkpoint_save'] == 0:
+                logger.info('Saving the model.')
+                model.save(current_step)
+
+
+            # -------------------------------
+            # 6) testing
+            # -------------------------------
+            if current_step % opt['train']['checkpoint_test'] == 0:
+
+                avg_psnr = 0.0
+                avg_ssim = 0.0
+                avg_psnrb = 0.0
+                idx = 0
+
+                for test_data in test_loader:
+                    idx += 1
+                    image_name_ext = os.path.basename(test_data['H_path'][0])
+                    img_name, ext = os.path.splitext(image_name_ext)
+
+                    img_dir = os.path.join(opt['path']['images'], img_name)
+                    util.mkdir(img_dir)
+
+                    model.feed_data(test_data)
+                    model.test()
+
+                    visuals = model.current_visuals()
+                    E_img = util.tensor2uint(visuals['E'])
+                    H_img = util.tensor2uint(visuals['H'])
+                    QF = 1-visuals['QF']
+                    # -----------------------
+                    # save estimated image E
+                    # -----------------------
+                    save_img_path = os.path.join(img_dir, '{:s}_{:d}.png'.format(img_name, current_step))
+                    util.imsave(E_img, save_img_path)
+
+                    # -----------------------
+                    # calculate PSNR
+                    # -----------------------
+
+                    current_psnr = util.calculate_psnr(E_img, H_img, border=border)
+
+                    avg_psnr += current_psnr
+
+                    # -----------------------
+                    # calculate SSIM
+                    # -----------------------
+
+                    current_ssim = util.calculate_ssim(E_img, H_img, border=border)
+
+                    avg_ssim += current_ssim
+
+                    # -----------------------
+                    # calculate PSNRB
+                    # -----------------------
+
+                    current_psnrb = util.calculate_psnrb(H_img, E_img, border=border)
+                    avg_psnrb += current_psnrb
+
+
+                    logger.info('{:->4d}--> {:>10s} | PSNR : {:<4.2f}dB | SSIM : {:<4.3f}dB | PSNRB : {:<4.2f}dB'.format(idx, image_name_ext, current_psnr, current_ssim, current_psnrb))
+                    logger.info('predicted quality factor: {:<4.2f}'.format(float(QF)))
+
+                avg_psnr = avg_psnr / idx
+                avg_ssim = avg_ssim / idx
+                avg_psnrb = avg_psnrb / idx
+
+                # testing log
+                logger.info('<epoch:{:3d}, iter:{:8,d}, Average PSNR : {:<.2f}dB, Average SSIM : {:<.3f}dB, Average PSNRB : {:<.2f}dB\n'.format(epoch, current_step, avg_psnr, avg_ssim, avg_psnrb))
+                
+    logger.info('Saving the final model.')
+    model.save('latest')
+    logger.info('End of training.')
+    
+
+if __name__ == '__main__':
+    main()         
             
             
             

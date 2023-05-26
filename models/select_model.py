@@ -23,7 +23,9 @@ def define_Model(opt):
 
     elif model == 'vrt':     # one video input L, for VRT
         from models.model_vrt import ModelVRT as M
-
+        
+    elif model == 'fbswin':
+        from models.model_fbswin import ModelFBSwin as M
     else:
         raise NotImplementedError('Model [{:s}] is not defined.'.format(model))
 

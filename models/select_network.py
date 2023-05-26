@@ -16,6 +16,18 @@ from torch.nn import init
 def define_G(opt):
     opt_net = opt['netG']
     net_type = opt_net['net_type']
+    
+    # ----------------------------
+    # jpeg artifacts removal task
+    # -----------------------------
+    if net_type == 'fbswin':
+        from models.network_fbswin import FBSwin as net
+        netG = net(in_nc=opt_net['in_nc'],
+                   out_nc=opt_net['out_nc'],
+                   nc=opt_net['nc'],
+                   nb=opt_net['nb'],  # total number of conv layers
+                   depths=opt_net['depths'],
+                   act_mode=opt_net['act_mode'])
 
 
     # ----------------------------------------

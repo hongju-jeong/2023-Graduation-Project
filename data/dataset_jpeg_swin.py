@@ -4,9 +4,9 @@ import utils.utils_image as util
 import cv2
 
 
-class DatasetJPEG(data.Dataset):
+class DatasetJPEGCustom(data.Dataset):
     def __init__(self, opt):
-        super(DatasetJPEG, self).__init__()
+        super(DatasetJPEGCustom, self).__init__()
         print('Dataset: JPEG compression artifact reduction (deblocking) with quality factor. Only dataroot_H is needed.')
         self.opt = opt
         self.n_channels = opt['n_channels'] if opt['n_channels'] else 3

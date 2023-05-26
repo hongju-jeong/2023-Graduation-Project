@@ -5,7 +5,7 @@ from utils import utils_image as util
 import re
 import glob
 import os
-
+from IPython import embed
 
 '''
 # --------------------------------------------
@@ -17,7 +17,7 @@ import os
 '''
 
 
-def find_last_checkpoint(save_dir, net_type='G', pretrained_path=None):
+def find_last_checkpoint(save_dir, net_type='G'):
     """
     # ---------------------------------------
     # Kai Zhang (github: https://github.com/cszn)
@@ -25,15 +25,13 @@ def find_last_checkpoint(save_dir, net_type='G', pretrained_path=None):
     # ---------------------------------------
     Args:
         save_dir: model folder
-        net_type: 'G' or 'D' or 'optimizerG' or 'optimizerD'
-        pretrained_path: pretrained model path. If save_dir does not have any model, load from pretrained_path
+        net_type: 'G' or 'D'
 
     Return:
         init_iter: iteration number
         init_path: model path
     # ---------------------------------------
     """
-
     file_list = glob.glob(os.path.join(save_dir, '*_{}.pth'.format(net_type)))
     if file_list:
         iter_exist = []
@@ -44,7 +42,7 @@ def find_last_checkpoint(save_dir, net_type='G', pretrained_path=None):
         init_path = os.path.join(save_dir, '{}_{}.pth'.format(init_iter, net_type))
     else:
         init_iter = 0
-        init_path = pretrained_path
+        init_path = None
     return init_iter, init_path
 
 
@@ -112,9 +110,51 @@ def test_pad(model, L, modulo=16, sf=1):
     paddingBottom = int(np.ceil(h/modulo)*modulo-h)
     paddingRight = int(np.ceil(w/modulo)*modulo-w)
     L = torch.nn.ReplicationPad2d((0, paddingRight, 0, paddingBottom))(L)
-    E = model(L)
+    E,QF = model(L)
     E = E[..., :h*sf, :w*sf]
     return E
+
+def test_pad_deblocking(model, L, modulo=16):
+#    embed()
+    h, w = L.size()[-2:]
+    E0 = model(L)
+    paddingH = int(h-np.floor(h/modulo)*modulo)
+    paddingW = int(w-np.floor(w/modulo)*modulo)
+#    embed()
+    top = slice(0,h-paddingH)
+    top_c = slice(h-paddingH,h)
+    bottom = slice(paddingH,h)
+    bottom_c = slice(0,paddingH)
+    left = slice(0,w-paddingW)
+    left_c = slice(w-paddingW, w)
+    right = slice(paddingW,w)
+    right_c = slice(0,paddingW)
+    L1 = L[...,top,left]
+#    L2 = L[...,top,right]
+#    embed()
+#    L3 = L[...,bottom,left]
+#    L4 = L[...,bottom,right]
+    E1 = test_mode(model, L1, mode=3)
+#    E2 = test_mode(model, L2, mode=3)
+    E0[...,top,left] = E1
+#    embed()
+#    E0[...,top,right] = E2
+#    E0[...,top,left_c] = E2[...,top,-1*paddingW:]
+#    L1 = torch.nn.ZeroPad2d((0, paddingW, 0, paddingH))(L)
+#    L1 = torch.nn.ConstantPad2d((0, paddingW, 0, paddingH),0)(L)
+#    E1 = model(L1)[..., :h, :w]
+#    L2 = torch.nn.ZeroPad2d((paddingW,0 , 0, paddingH))(L)
+#    E2 = model(L2)[..., :h, paddingW:]
+#    L3 = torch.nn.ZeroPad2d((0, paddingW, paddingH, 0))(L)
+#    E3 = model(L3)[..., paddingH:, :w]
+#    L4 = torch.nn.ZeroPad2d((paddingW,0 , paddingH,0))(L)
+#    E4 = model(L4)[..., paddingH:, paddingW:]
+#    embed()
+    E_list = [E0]
+    output_cat = torch.stack(E_list, dim=0)
+    E = output_cat.mean(dim=0, keepdim=False)    
+    return E
+
 
 
 '''
@@ -294,11 +334,11 @@ def describe_params(model):
     if isinstance(model, torch.nn.DataParallel):
         model = model.module
     msg = '\n'
-    msg += ' | {:^6s} | {:^6s} | {:^6s} | {:^6s} || {:<20s}'.format('mean', 'min', 'max', 'std', 'shape', 'param_name') + '\n'
+    msg += ' | {:^6s} | {:^6s} | {:^6s} | {:^6s} || {:<20s}'.format('mean', 'min', 'max', 'std', 'param_name') + '\n'
     for name, param in model.state_dict().items():
         if not 'num_batches_tracked' in name:
             v = param.data.clone().float()
-            msg += ' | {:>6.3f} | {:>6.3f} | {:>6.3f} | {:>6.3f} | {} || {:s}'.format(v.mean(), v.min(), v.max(), v.std(), v.shape, name) + '\n'
+            msg += ' | {:>6.3f} | {:>6.3f} | {:>6.3f} | {:>6.3f} || {:s}'.format(v.mean(), v.min(), v.max(), v.std(), name) + '\n'
     return msg
 
 

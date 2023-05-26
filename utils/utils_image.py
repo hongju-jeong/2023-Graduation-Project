@@ -9,7 +9,6 @@ from datetime import datetime
 # import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 
 '''
@@ -66,12 +65,8 @@ def surf(Z, cmap='rainbow', figsize=None):
 
 def get_image_paths(dataroot):
     paths = None  # return None if dataroot is None
-    if isinstance(dataroot, str):
+    if dataroot is not None:
         paths = sorted(_get_paths_from_images(dataroot))
-    elif isinstance(dataroot, list):
-        paths = []
-        for i in dataroot:
-            paths += sorted(_get_paths_from_images(i))
     return paths
 
 
@@ -238,15 +233,15 @@ def read_img(path):
 # --------------------------------------------
 # image format conversion
 # --------------------------------------------
-# numpy(single) <--->  numpy(uint)
+# numpy(single) <--->  numpy(unit)
 # numpy(single) <--->  tensor
-# numpy(uint)   <--->  tensor
+# numpy(unit)   <--->  tensor
 # --------------------------------------------
 '''
 
 
 # --------------------------------------------
-# numpy(single) [0, 1] <--->  numpy(uint)
+# numpy(single) [0, 1] <--->  numpy(unit)
 # --------------------------------------------
 
 
@@ -271,7 +266,7 @@ def single2uint16(img):
 
 
 # --------------------------------------------
-# numpy(uint) (HxWxC or HxW) <--->  tensor
+# numpy(unit) (HxWxC or HxW) <--->  tensor
 # --------------------------------------------
 
 
@@ -366,7 +361,7 @@ def tensor2img(tensor, out_type=np.uint8, min_max=(0, 1)):
             'Only support 4D, 3D and 2D tensor. But received with dimension: {:d}'.format(n_dim))
     if out_type == np.uint8:
         img_np = (img_np * 255.0).round()
-        # Important. Unlike matlab, numpy.uint8() WILL NOT round by default.
+        # Important. Unlike matlab, numpy.unit8() WILL NOT round by default.
     return img_np.astype(out_type)
 
 
@@ -567,7 +562,6 @@ def ycbcr2rgb(img):
     # convert
     rlt = np.matmul(img, [[0.00456621, 0.00456621, 0.00456621], [0, -0.00153632, 0.00791071],
                           [0.00625893, -0.00318811, 0]]) * 255.0 + [-222.921, 135.576, -276.836]
-    rlt = np.clip(rlt, 0, 255)
     if in_img_type == np.uint8:
         rlt = rlt.round()
     else:
@@ -615,7 +609,7 @@ def channel_convert(in_c, tar_type, img_list):
 
 '''
 # --------------------------------------------
-# metric, PSNR, SSIM and PSNRB
+# metric, PSNR and SSIM
 # --------------------------------------------
 '''
 
@@ -639,6 +633,83 @@ def calculate_psnr(img1, img2, border=0):
     if mse == 0:
         return float('inf')
     return 20 * math.log10(255.0 / math.sqrt(mse))
+
+
+# --------------------------------------------
+# BEF: Blocking effect factor
+# --------------------------------------------
+def compute_bef(img):
+
+	block = 8
+	height, width = img.shape[:2]
+	
+	H = [i for i in range(width-1)]
+	H_B = [i for i in range(block-1,width-1,block)]
+	H_BC = list(set(H)-set(H_B))
+
+	V = [i for i in range(height-1)]
+	V_B = [i for i in range(block-1,height-1,block)]
+	V_BC = list(set(V)-set(V_B))
+
+	D_B = 0
+	D_BC = 0
+
+	for i in H_B:
+		diff = img[:,i] - img[:,i+1]
+		D_B += np.sum(diff**2)
+
+	for i in H_BC:
+		diff = img[:,i] - img[:,i+1]
+		D_BC += np.sum(diff**2)
+
+
+	for j in V_B:
+		diff = img[j,:] - img[j+1,:]
+		D_B += np.sum(diff**2)
+
+	for j in V_BC:
+		diff = img[j,:] - img[j+1,:]
+		D_BC += np.sum(diff**2)
+
+
+	N_HB = height * (width/block - 1)
+	N_HBC = height * (width - 1) - N_HB
+	N_VB = width * (height/block -1)
+	N_VBC = width * (height -1) - N_VB
+	D_B = D_B / (N_HB + N_VB)
+	D_BC = D_BC / (N_HBC + N_VBC)
+	eta = math.log2(block) / math.log2(min(height, width)) if D_B > D_BC else 0
+	return eta * (D_B - D_BC)
+
+
+
+# --------------------------------------------
+# PSNRB
+# --------------------------------------------
+def calculate_psnrb(img1, img2, border=0):
+	# img1: ground truth
+	# img2: compressed image
+    # img1 and img2 have range [0, 255]
+    #img1 = img1.squeeze()
+    #img2 = img2.squeeze()
+    if not img1.shape == img2.shape:
+        raise ValueError('Input images must have the same dimensions.')
+    h, w = img1.shape[:2]
+    img1 = img1[border:h-border, border:w-border]
+    img2 = img2[border:h-border, border:w-border]
+    img1 = img1.astype(np.float64)
+    if img2.shape[-1]==3:
+        img2_y = rgb2ycbcr(img2).astype(np.float64)
+        bef = compute_bef(img2_y)
+    else:
+        img2 = img2.astype(np.float64)
+        bef = compute_bef(img2)
+    mse = np.mean((img1 - img2)**2)
+    mse_b = mse + bef
+    if mse_b == 0:
+        return float('inf')
+    return 20 * math.log10(255.0 / math.sqrt(mse_b))
+
 
 
 # --------------------------------------------
@@ -693,87 +764,6 @@ def ssim(img1, img2):
                                                             (sigma1_sq + sigma2_sq + C2))
     return ssim_map.mean()
 
-
-def _blocking_effect_factor(im):
-    block_size = 8
-
-    block_horizontal_positions = torch.arange(7, im.shape[3] - 1, 8)
-    block_vertical_positions = torch.arange(7, im.shape[2] - 1, 8)
-
-    horizontal_block_difference = (
-                (im[:, :, :, block_horizontal_positions] - im[:, :, :, block_horizontal_positions + 1]) ** 2).sum(
-        3).sum(2).sum(1)
-    vertical_block_difference = (
-                (im[:, :, block_vertical_positions, :] - im[:, :, block_vertical_positions + 1, :]) ** 2).sum(3).sum(
-        2).sum(1)
-
-    nonblock_horizontal_positions = np.setdiff1d(torch.arange(0, im.shape[3] - 1), block_horizontal_positions)
-    nonblock_vertical_positions = np.setdiff1d(torch.arange(0, im.shape[2] - 1), block_vertical_positions)
-
-    horizontal_nonblock_difference = (
-                (im[:, :, :, nonblock_horizontal_positions] - im[:, :, :, nonblock_horizontal_positions + 1]) ** 2).sum(
-        3).sum(2).sum(1)
-    vertical_nonblock_difference = (
-                (im[:, :, nonblock_vertical_positions, :] - im[:, :, nonblock_vertical_positions + 1, :]) ** 2).sum(
-        3).sum(2).sum(1)
-
-    n_boundary_horiz = im.shape[2] * (im.shape[3] // block_size - 1)
-    n_boundary_vert = im.shape[3] * (im.shape[2] // block_size - 1)
-    boundary_difference = (horizontal_block_difference + vertical_block_difference) / (
-                n_boundary_horiz + n_boundary_vert)
-
-    n_nonboundary_horiz = im.shape[2] * (im.shape[3] - 1) - n_boundary_horiz
-    n_nonboundary_vert = im.shape[3] * (im.shape[2] - 1) - n_boundary_vert
-    nonboundary_difference = (horizontal_nonblock_difference + vertical_nonblock_difference) / (
-                n_nonboundary_horiz + n_nonboundary_vert)
-
-    scaler = np.log2(block_size) / np.log2(min([im.shape[2], im.shape[3]]))
-    bef = scaler * (boundary_difference - nonboundary_difference)
-
-    bef[boundary_difference <= nonboundary_difference] = 0
-    return bef
-
-
-def calculate_psnrb(img1, img2, border=0):
-    """Calculate PSNR-B (Peak Signal-to-Noise Ratio).
-    Ref: Quality assessment of deblocked images, for JPEG image deblocking evaluation
-    # https://gitlab.com/Queuecumber/quantization-guided-ac/-/blob/master/metrics/psnrb.py
-    Args:
-        img1 (ndarray): Images with range [0, 255].
-        img2 (ndarray): Images with range [0, 255].
-        border (int): Cropped pixels in each edge of an image. These
-            pixels are not involved in the PSNR calculation.
-        test_y_channel (bool): Test on Y channel of YCbCr. Default: False.
-    Returns:
-        float: psnr result.
-    """
-
-    if not img1.shape == img2.shape:
-        raise ValueError('Input images must have the same dimensions.')
-
-    if img1.ndim == 2:
-        img1, img2 = np.expand_dims(img1, 2), np.expand_dims(img2, 2)
-
-    h, w = img1.shape[:2]
-    img1 = img1[border:h-border, border:w-border]
-    img2 = img2[border:h-border, border:w-border]
-
-    img1 = img1.astype(np.float64)
-    img2 = img2.astype(np.float64)
-
-    # follow https://gitlab.com/Queuecumber/quantization-guided-ac/-/blob/master/metrics/psnrb.py
-    img1 = torch.from_numpy(img1).permute(2, 0, 1).unsqueeze(0) / 255.
-    img2 = torch.from_numpy(img2).permute(2, 0, 1).unsqueeze(0) / 255.
-
-    total = 0
-    for c in range(img1.shape[1]):
-        mse = torch.nn.functional.mse_loss(img1[:, c:c + 1, :, :], img2[:, c:c + 1, :, :], reduction='none')
-        bef = _blocking_effect_factor(img1[:, c:c + 1, :, :])
-
-        mse = mse.view(mse.shape[0], -1).mean(1)
-        total += 10 * torch.log10(1 / (mse + bef))
-
-    return float(total) / img1.shape[1]
 
 '''
 # --------------------------------------------
@@ -1007,10 +997,3 @@ if __name__ == '__main__':
     
 #    patches = patches_from_image(img, p_size=128, p_overlap=0, p_max=200)
 #    imssave(patches,'a.png')
-
-
-    
-    
-    
-    
-    
